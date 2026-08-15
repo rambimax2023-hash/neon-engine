@@ -1,0 +1,806 @@
+/*!
+ * ═══════════════════════════════════════════════════════════════
+ *   NEON ENGINE ULTIMATE v8.0 — 2D + 3D
+ *   Полный игровой движок на JavaScript
+ * ═══════════════════════════════════════════════════════════════
+ * 
+ *   2D: спрайты, тайлмапы, физика, группы, сцены, звук
+ *   3D: Three.js, открытый мир, GLTF, AI NPC, сеть
+ * 
+ *   Для 3D нужен Three.js (подключи до этого файла):
+ *   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+ *   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/loaders/GLTFLoader.js"></script>
+ * ═══════════════════════════════════════════════════════════════
+ */
+
+(function(global) {
+    "use strict";
+
+    // ============================================================
+    //  ЧАСТЬ 1: 2D ДВИЖОК (NeonEngineV7)
+    // ============================================================
+
+    class ResourceLoader {
+        constructor() {
+            this.resources = {};
+            this.loading = false;
+            this.queue = [];
+            this.onProgress = null;
+            this.onComplete = null;
+        }
+        image(key, url) { this.queue.push({ type: 'image', key, url }); return this; }
+        audio(key, url) { this.queue.push({ type: 'audio', key, url }); return this; }
+        json(key, url) { this.queue.push({ type: 'json', key, url }); return this; }
+        load(callback) {
+            if (this.loading) return;
+            this.loading = true;
+            let loaded = 0;
+            const total = this.queue.length;
+            if (total === 0) { this.loading = false; if (callback) callback(); return; }
+            for (const item of this.queue) {
+                if (item.type === 'image') {
+                    const img = new Image();
+                    img.onload = () => {
+                        this.resources[item.key] = img;
+                        loaded++;
+                        this.onProgress?.(loaded / total);
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    };
+                    img.onerror = () => {
+                        loaded++;
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    };
+                    img.src = item.url;
+                }
+                if (item.type === 'audio') {
+                    fetch(item.url).then(res => res.arrayBuffer()).then(data => {
+                        this.resources[item.key] = data;
+                        loaded++;
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    }).catch(() => {
+                        loaded++;
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    });
+                }
+                if (item.type === 'json') {
+                    fetch(item.url).then(res => res.json()).then(data => {
+                        this.resources[item.key] = data;
+                        loaded++;
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    }).catch(() => {
+                        loaded++;
+                        if (loaded === total) { this.loading = false; this.queue = []; this.onComplete?.(); if (callback) callback(); }
+                    });
+                }
+            }
+        }
+        get(key) { return this.resources[key] || null; }
+        has(key) { return key in this.resources; }
+    }
+
+    class Sprite {
+        constructor(scene, x, y, texture) {
+            this.scene = scene; this.x = x; this.y = y; this.texture = texture || null;
+            this.width = 0; this.height = 0; this.rotation = 0;
+            this.scaleX = 1; this.scaleY = 1; this.alpha = 1; this.visible = true;
+            this.originX = 0.5; this.originY = 0.5; this.tint = '#ffffff';
+            this.anims = {}; this.currentAnim = null; this.frame = 0; this.animTimer = 0;
+            this.children = []; this.parent = null;
+            if (texture && scene.loader.has(texture)) {
+                const img = scene.loader.get(texture);
+                this.width = img.width; this.height = img.height;
+            }
+        }
+        setTexture(key) {
+            this.texture = key;
+            if (this.scene.loader.has(key)) {
+                const img = this.scene.loader.get(key);
+                this.width = img.width; this.height = img.height;
+            }
+            return this;
+        }
+        createAnimation(key, frames, frameRate = 10, loop = true) {
+            this.anims[key] = { frames, frameRate, loop, currentFrame: 0, timer: 0 };
+            return this;
+        }
+        play(key) {
+            if (this.anims[key]) { this.currentAnim = key; this.anims[key].currentFrame = 0; this.anims[key].timer = 0; }
+            return this;
+        }
+        update(dt) {
+            if (this.currentAnim) {
+                const anim = this.anims[this.currentAnim];
+                if (anim) {
+                    anim.timer += dt;
+                    if (anim.timer >= 1 / anim.frameRate) {
+                        anim.timer = 0; anim.currentFrame++;
+                        if (anim.currentFrame >= anim.frames.length) {
+                            anim.currentFrame = anim.loop ? 0 : anim.frames.length - 1;
+                        }
+                        this.frame = anim.frames[anim.currentFrame];
+                    }
+                }
+            }
+            for (const child of this.children) if (child.update) child.update(dt);
+        }
+        addChild(child) { child.parent = this; this.children.push(child); return child; }
+        draw(ctx) {
+            if (!this.visible || this.alpha <= 0) return;
+            ctx.save();
+            ctx.globalAlpha = this.alpha;
+            const ox = this.width * this.originX, oy = this.height * this.originY;
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.rotation);
+            ctx.scale(this.scaleX, this.scaleY);
+            ctx.translate(-ox, -oy);
+            if (this.texture && this.scene.loader.has(this.texture)) {
+                const img = this.scene.loader.get(this.texture);
+                if (this.tint !== '#ffffff') {
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'source-atop';
+                    ctx.fillStyle = this.tint;
+                    ctx.fillRect(0, 0, this.width, this.height);
+                    ctx.restore();
+                    ctx.globalCompositeOperation = 'source-over';
+                }
+                ctx.drawImage(img, 0, 0, this.width, this.height);
+            } else {
+                ctx.fillStyle = '#22d3ee';
+                ctx.fillRect(0, 0, 32, 32);
+                ctx.fillStyle = '#0a0a12';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText('Sprite', 16, 20);
+            }
+            for (const child of this.children) if (child.draw) child.draw(ctx);
+            ctx.restore();
+        }
+        setSize(width, height) { this.width = width; this.height = height; return this; }
+        setPosition(x, y) { this.x = x; this.y = y; return this; }
+        setOrigin(x, y) { this.originX = x; this.originY = y; return this; }
+    }
+
+    class Group {
+        constructor(scene) { this.scene = scene; this.children = []; this.active = true; }
+        add(obj) { this.children.push(obj); return obj; }
+        create(x, y, texture) { const sprite = new Sprite(this.scene, x, y, texture); this.children.push(sprite); return sprite; }
+        getChildren() { return this.children; }
+        update(dt) { if (!this.active) return; for (const c of this.children) if (c.update) c.update(dt); }
+        draw(ctx) { if (!this.active) return; for (const c of this.children) if (c.draw) c.draw(ctx); }
+        clear() { this.children = []; }
+        destroy() { this.clear(); this.active = false; }
+    }
+
+    class Tilemap {
+        constructor(scene, data, tileSize = 32) {
+            this.scene = scene; this.data = data; this.tileSize = tileSize;
+            this.tileset = null; this.tileColors = {}; this.visible = true; this.opacity = 1;
+        }
+        setTileset(tileset) { this.tileset = tileset; return this; }
+        setTileColors(colors) { this.tileColors = colors; return this; }
+        getTile(row, col) {
+            if (row < 0 || row >= this.data.length) return null;
+            if (col < 0 || col >= this.data[0].length) return null;
+            return this.data[row][col];
+        }
+        setTile(row, col, value) {
+            if (row < 0 || row >= this.data.length) return;
+            if (col < 0 || col >= this.data[0].length) return;
+            this.data[row][col] = value;
+        }
+        draw(ctx) {
+            if (!this.visible) return;
+            const ts = this.tileSize;
+            const width = this.data[0]?.length || 0;
+            const height = this.data.length;
+            for (let row = 0; row < height; row++) {
+                for (let col = 0; col < width; col++) {
+                    const tile = this.data[row][col];
+                    if (tile === 0 || tile === undefined) continue;
+                    const x = col * ts, y = row * ts;
+                    if (this.tileset && this.tileset[tile]) {
+                        ctx.drawImage(this.tileset[tile], x, y, ts, ts);
+                    } else {
+                        const color = this.tileColors[tile] || '#333333';
+                        ctx.fillStyle = color;
+                        ctx.fillRect(x, y, ts - 1, ts - 1);
+                        ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+                        ctx.lineWidth = 1;
+                        ctx.strokeRect(x, y, ts, ts);
+                    }
+                }
+            }
+        }
+        isSolid(row, col) { const tile = this.getTile(row, col); return tile === 1 || tile === 2 || tile === 3; }
+    }
+
+    class ArcadePhysics {
+        constructor(scene) { this.scene = scene; this.bodies = []; this.gravity = { x: 0, y: 300 }; }
+        add(sprite) {
+            const body = {
+                sprite, velocity: { x: 0, y: 0 }, acceleration: { x: 0, y: 0 },
+                drag: 1, maxVelocity: 1000, bounce: 0, immovable: false,
+                allowGravity: true, checkCollision: true,
+                width: sprite.width || 32, height: sprite.height || 32
+            };
+            this.bodies.push(body); sprite.body = body; return body;
+        }
+        update(dt) {
+            for (const body of this.bodies) {
+                if (!body.sprite.visible || body.immovable) continue;
+                if (body.allowGravity) {
+                    body.velocity.x += this.gravity.x * dt;
+                    body.velocity.y += this.gravity.y * dt;
+                }
+                body.velocity.x += body.acceleration.x * dt;
+                body.velocity.y += body.acceleration.y * dt;
+                body.velocity.x *= body.drag;
+                body.velocity.y *= body.drag;
+                const speed = Math.sqrt(body.velocity.x ** 2 + body.velocity.y ** 2);
+                if (speed > body.maxVelocity) {
+                    body.velocity.x = (body.velocity.x / speed) * body.maxVelocity;
+                    body.velocity.y = (body.velocity.y / speed) * body.maxVelocity;
+                }
+                body.sprite.x += body.velocity.x * dt;
+                body.sprite.y += body.velocity.y * dt;
+            }
+        }
+        collider(obj1, obj2, callback) {
+            const body1 = obj1.body || obj1, body2 = obj2.body || obj2;
+            const bx1 = body1.sprite.x - body1.width / 2, by1 = body1.sprite.y - body1.height / 2;
+            const bx2 = body2.sprite.x - body2.width / 2, by2 = body2.sprite.y - body2.height / 2;
+            if (bx1 < bx2 + body2.width && bx1 + body1.width > bx2 && by1 < by2 + body2.height && by1 + body1.height > by2) {
+                if (callback) callback(obj1, obj2);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    class PostEffects {
+        constructor(scene) { this.scene = scene; this.pipelines = []; this.active = null; }
+        add(name, effect) { this.pipelines.push({ name, effect, active: false }); return this; }
+        enable(name) { for (const p of this.pipelines) p.active = (p.name === name); this.active = name; return this; }
+        disable() { for (const p of this.pipelines) p.active = false; this.active = null; return this; }
+        apply(ctx, width, height) {
+            if (!this.active) return;
+            const pipeline = this.pipelines.find(p => p.name === this.active);
+            if (!pipeline) return;
+            pipeline.effect(ctx, width, height);
+        }
+    }
+
+    class Text {
+        constructor(scene, x, y, text, options = {}) {
+            this.scene = scene; this.x = x; this.y = y; this.text = text;
+            this.style = {
+                fontFamily: options.fontFamily || 'Arial', fontSize: options.fontSize || '32px',
+                color: options.color || '#ffffff', align: options.align || 'left',
+                bold: options.bold || false, italic: options.italic || false,
+                stroke: options.stroke || null, strokeThickness: options.strokeThickness || 2,
+                shadow: options.shadow || null, shadowBlur: options.shadowBlur || 4,
+                shadowOffsetX: options.shadowOffsetX || 2, shadowOffsetY: options.shadowOffsetY || 2,
+                padding: options.padding || 0
+            };
+            this.visible = true; this.alpha = 1; this.rotation = 0; this.scaleX = 1; this.scaleY = 1;
+        }
+        setText(text) { this.text = text; return this; }
+        setStyle(style) { this.style = { ...this.style, ...style }; return this; }
+        draw(ctx) {
+            if (!this.visible || this.alpha <= 0) return;
+            ctx.save();
+            ctx.globalAlpha = this.alpha;
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.rotation);
+            ctx.scale(this.scaleX, this.scaleY);
+            let font = '';
+            if (this.style.bold) font += 'bold ';
+            if (this.style.italic) font += 'italic ';
+            font += this.style.fontSize + ' ' + this.style.fontFamily;
+            ctx.font = font;
+            ctx.textAlign = this.style.align;
+            ctx.textBaseline = 'top';
+            if (this.style.shadow) {
+                ctx.shadowColor = this.style.shadow;
+                ctx.shadowBlur = this.style.shadowBlur;
+                ctx.shadowOffsetX = this.style.shadowOffsetX;
+                ctx.shadowOffsetY = this.style.shadowOffsetY;
+            }
+            if (this.style.stroke) {
+                ctx.strokeStyle = this.style.stroke;
+                ctx.lineWidth = this.style.strokeThickness;
+                ctx.strokeText(this.text, 0, 0);
+            }
+            ctx.fillStyle = this.style.color;
+            ctx.fillText(this.text, 0, 0);
+            ctx.restore();
+        }
+    }
+
+    class Scene {
+        constructor(key) {
+            this.key = key; this.loader = new ResourceLoader();
+            this.objects = []; this.groups = []; this.physics = new ArcadePhysics(this);
+            this.camera = { x: 0, y: 0, zoom: 1, shake: { intensity: 0, duration: 0, timer: 0 } };
+            this.postEffects = new PostEffects(this);
+            this.sound = { sounds: {}, music: null, play: function(key) {} };
+            this.input = { keyboard: { keys: {} }, mouse: { x: 0, y: 0 }, gamepad: null };
+            this.isActive = false;
+        }
+        addSprite(x, y, texture) { const s = new Sprite(this, x, y, texture); this.objects.push(s); return s; }
+        addGroup() { const g = new Group(this); this.groups.push(g); return g; }
+        createTilemap(data, tileSize) { const m = new Tilemap(this, data, tileSize); this.objects.push(m); return m; }
+        createText(x, y, text, options) { const t = new Text(this, x, y, text, options); this.objects.push(t); return t; }
+        update(dt) {
+            if (!this.isActive) return;
+            if (this.camera.shake.duration > 0) {
+                this.camera.shake.timer += dt;
+                if (this.camera.shake.timer >= this.camera.shake.duration) this.camera.shake.duration = 0;
+            }
+            for (const obj of this.objects) if (obj.update) obj.update(dt);
+            for (const g of this.groups) if (g.update) g.update(dt);
+            this.physics.update(dt);
+        }
+        draw(ctx) {
+            if (!this.isActive) return;
+            ctx.save();
+            const cx = this.camera.x, cy = this.camera.y, zoom = this.camera.zoom;
+            let shakeX = 0, shakeY = 0;
+            if (this.camera.shake.duration > 0) {
+                const progress = this.camera.shake.timer / this.camera.shake.duration;
+                const intensity = this.camera.shake.intensity * (1 - progress);
+                shakeX = Math.sin(this.camera.shake.timer * 20) * intensity;
+                shakeY = Math.cos(this.camera.shake.timer * 25) * intensity;
+            }
+            ctx.translate(-cx + shakeX, -cy + shakeY);
+            ctx.scale(zoom, zoom);
+            for (const obj of this.objects) if (obj.draw) obj.draw(ctx);
+            for (const g of this.groups) if (g.draw) g.draw(ctx);
+            ctx.restore();
+            this.postEffects.apply(ctx, ctx.canvas.width, ctx.canvas.height);
+        }
+        shakeCamera(intensity, duration) {
+            this.camera.shake.intensity = intensity;
+            this.camera.shake.duration = duration;
+            this.camera.shake.timer = 0;
+        }
+        follow(target, smoothness = 0.1) { this._followTarget = target; this._followSmoothness = smoothness; }
+        start() { this.isActive = true; }
+        stop() { this.isActive = false; }
+    }
+
+    class NeonEngineV7 {
+        constructor(canvas, options = {}) {
+            this.canvas = canvas; this.ctx = canvas.getContext('2d');
+            this.width = options.width || 800; this.height = options.height || 600;
+            canvas.width = this.width; canvas.height = this.height;
+            this.scenes = {}; this.currentScene = null; this.running = false;
+            this.lastTime = 0; this.fps = 0; this.frameCount = 0;
+            this.defaultScene = new Scene('default');
+            this.scenes['default'] = this.defaultScene;
+            this.currentScene = this.defaultScene;
+            this.currentScene.start();
+        }
+        createScene(key) { const s = new Scene(key); this.scenes[key] = s; return s; }
+        switchScene(key) {
+            if (this.currentScene) this.currentScene.stop();
+            if (this.scenes[key]) { this.currentScene = this.scenes[key]; this.currentScene.start(); }
+            return this;
+        }
+        getScene(key) { return this.scenes[key] || null; }
+        start() { this.running = true; this.lastTime = performance.now(); this.gameLoop(this.lastTime); }
+        stop() { this.running = false; }
+        gameLoop = (currentTime) => {
+            if (!this.running) return;
+            const dt = Math.min((currentTime - this.lastTime) / 1000, 0.016);
+            this.lastTime = currentTime;
+            if (this.currentScene) this.currentScene.update(dt);
+            this.render();
+            this.frameCount++;
+            if (this.frameCount % 60 === 0) this.fps = Math.round(1 / dt);
+            requestAnimationFrame((t) => this.gameLoop(t));
+        }
+        render() {
+            const ctx = this.ctx;
+            ctx.clearRect(0, 0, this.width, this.height);
+            ctx.fillStyle = '#0a0a12';
+            ctx.fillRect(0, 0, this.width, this.height);
+            if (this.currentScene) this.currentScene.draw(ctx);
+            ctx.fillStyle = '#22d3ee';
+            ctx.font = '12px monospace';
+            ctx.fillText(`FPS: ${this.fps}`, 10, 20);
+        }
+    }
+
+    global.NeonEngineV7 = { create: (canvas, opts) => new NeonEngineV7(canvas, opts), version: '7.0.0-sprite' };
+
+    // ============================================================
+    //  ЧАСТЬ 2: 3D РАСШИРЕНИЕ (Three.js)
+    // ============================================================
+
+    if (typeof THREE !== "undefined") {
+
+        // Sound
+        class SoundManager {
+            constructor() {
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                this.buffers = {};
+                this.masterGain = this.ctx.createGain();
+                this.masterGain.connect(this.ctx.destination);
+                this.musicSource = null;
+                this.musicGain = this.ctx.createGain();
+                this.musicGain.connect(this.masterGain);
+            }
+            async load(key, url) {
+                const res = await fetch(url);
+                const arrayBuffer = await res.arrayBuffer();
+                const audioBuffer = await this.ctx.decodeAudioData(arrayBuffer);
+                this.buffers[key] = audioBuffer;
+                return audioBuffer;
+            }
+            play(key, { volume = 1, rate = 1, loop = false } = {}) {
+                if (!this.buffers[key]) { console.warn(`Sound not loaded: ${key}`); return null; }
+                if (this.ctx.state === "suspended") this.ctx.resume();
+                const source = this.ctx.createBufferSource();
+                source.buffer = this.buffers[key];
+                source.loop = loop;
+                source.playbackRate.value = rate;
+                const gain = this.ctx.createGain();
+                gain.gain.value = volume;
+                source.connect(gain);
+                gain.connect(this.masterGain);
+                source.start(0);
+                return source;
+            }
+            playMusic(key, volume = 0.5) {
+                this.stopMusic();
+                if (!this.buffers[key]) { console.warn(`Music not loaded: ${key}`); return; }
+                if (this.ctx.state === "suspended") this.ctx.resume();
+                const source = this.ctx.createBufferSource();
+                source.buffer = this.buffers[key];
+                source.loop = true;
+                this.musicGain.gain.value = volume;
+                source.connect(this.musicGain);
+                source.start(0);
+                this.musicSource = source;
+            }
+            stopMusic() { if (this.musicSource) { this.musicSource.stop(); this.musicSource = null; } }
+            setMasterVolume(v) { this.masterGain.gain.value = v; }
+        }
+
+        // Physics3D
+        class Physics3D {
+            constructor() {
+                this.bodies = [];
+                this.gravity = -9.8 * 3;
+                this.groundY = 0;
+            }
+            add(obj, { mass = 1, isStatic = false, friction = 0.9, bounce = 0 } = {}) {
+                const body = {
+                    obj,
+                    velocity: new THREE.Vector3(0, 0, 0),
+                    mass,
+                    isStatic,
+                    friction,
+                    bounce,
+                    onGround: false,
+                    size: obj.size || { x: 1, y: 1, z: 1 }
+                };
+                this.bodies.push(body);
+                obj.body = body;
+                return body;
+            }
+            remove(obj) { this.bodies = this.bodies.filter(b => b.obj !== obj); }
+            update(dt, terrainHeightFn) {
+                for (const body of this.bodies) {
+                    if (body.isStatic) continue;
+                    body.velocity.y += this.gravity * dt;
+                    body.velocity.x *= body.friction;
+                    body.velocity.z *= body.friction;
+                    body.obj.position.x += body.velocity.x * dt;
+                    body.obj.position.y += body.velocity.y * dt;
+                    body.obj.position.z += body.velocity.z * dt;
+                    const groundHeight = terrainHeightFn ? terrainHeightFn(body.obj.position.x, body.obj.position.z) : this.groundY;
+                    const half = body.size.y / 2;
+                    if (body.obj.position.y - half <= groundHeight) {
+                        body.obj.position.y = groundHeight + half;
+                        body.velocity.y = -body.velocity.y * body.bounce;
+                        body.onGround = true;
+                    } else body.onGround = false;
+                }
+                for (let i = 0; i < this.bodies.length; i++)
+                    for (let j = i + 1; j < this.bodies.length; j++)
+                        this._resolvePair(this.bodies[i], this.bodies[j]);
+            }
+            _resolvePair(a, b) {
+                if (a.isStatic && b.isStatic) return;
+                const pa = a.obj.position, pb = b.obj.position;
+                const dx = pa.x - pb.x, dz = pa.z - pb.z;
+                const minDist = (a.size.x + b.size.x) / 2;
+                const dist = Math.sqrt(dx * dx + dz * dz);
+                if (dist < minDist && dist > 0.0001) {
+                    const overlap = minDist - dist;
+                    const nx = dx / dist, nz = dz / dist;
+                    if (!a.isStatic) { pa.x += nx * overlap * 0.5; pa.z += nz * overlap * 0.5; }
+                    if (!b.isStatic) { pb.x -= nx * overlap * 0.5; pb.z -= nz * overlap * 0.5; }
+                }
+            }
+            checkOverlap(a, b) {
+                const pa = a.position, pb = b.position;
+                const sa = a.size || { x: 1, y: 1, z: 1 };
+                const sb = b.size || { x: 1, y: 1, z: 1 };
+                return Math.abs(pa.x - pb.x) < (sa.x + sb.x) / 2 &&
+                       Math.abs(pa.y - pb.y) < (sa.y + sb.y) / 2 &&
+                       Math.abs(pa.z - pb.z) < (sa.z + sb.z) / 2;
+            }
+        }
+
+        // OpenWorldTerrain
+        class OpenWorldTerrain {
+            constructor({ size = 500, segments = 100, maxHeight = 15, seed = 1 } = {}) {
+                this.size = size;
+                this.segments = segments;
+                this.maxHeight = maxHeight;
+                this.seed = seed;
+                const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+                geometry.rotateX(-Math.PI / 2);
+                const pos = geometry.attributes.position;
+                for (let i = 0; i < pos.count; i++) {
+                    const x = pos.getX(i);
+                    const z = pos.getZ(i);
+                    pos.setY(i, this._noise(x, z));
+                }
+                geometry.computeVertexNormals();
+                const material = new THREE.MeshStandardMaterial({ color: 0x2a5c3a, flatShading: true });
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.receiveShadow = true;
+            }
+            _noise(x, z) {
+                const s = this.seed;
+                return Math.sin(x * 0.02 + s) * Math.cos(z * 0.02 + s) * this.maxHeight * 0.6 +
+                       Math.sin(x * 0.05 + s * 2) * Math.cos(z * 0.05) * this.maxHeight * 0.3 +
+                       Math.sin(x * 0.1) * Math.sin(z * 0.1) * this.maxHeight * 0.1;
+            }
+            heightAt(x, z) { return this._noise(x, z); }
+            addTo(scene) { scene.add(this.mesh); return this; }
+        }
+
+        // Character3D
+        class Character3D {
+            constructor({ size = { x: 1, y: 2, z: 1 } } = {}) {
+                this.mesh = null;
+                this.mixer = null;
+                this.actions = {};
+                this.currentAction = null;
+                this.size = size;
+                this.position = new THREE.Vector3(0, 0, 0);
+                this.loaded = false;
+            }
+            async loadModel(url) {
+                return new Promise((resolve, reject) => {
+                    const loader = new THREE.GLTFLoader();
+                    loader.load(url, (gltf) => {
+                        this.mesh = gltf.scene;
+                        this.mesh.traverse(n => { if (n.isMesh) { n.castShadow = true; n.receiveShadow = true; } });
+                        this.mixer = new THREE.AnimationMixer(this.mesh);
+                        gltf.animations.forEach(clip => { this.actions[clip.name] = this.mixer.clipAction(clip); });
+                        this.loaded = true;
+                        resolve(this);
+                    }, undefined, reject);
+                });
+            }
+            usePlaceholder(color = 0x22d3ee) {
+                const geo = new THREE.CapsuleGeometry(this.size.x / 2, this.size.y - this.size.x, 4, 8);
+                const mat = new THREE.MeshStandardMaterial({ color });
+                this.mesh = new THREE.Mesh(geo, mat);
+                this.mesh.castShadow = true;
+                this.loaded = true;
+                return this;
+            }
+            play(name, { fadeTime = 0.2, loop = true } = {}) {
+                const action = this.actions[name];
+                if (!action) return;
+                if (this.currentAction === action) return;
+                if (this.currentAction) this.currentAction.fadeOut(fadeTime);
+                action.reset().fadeIn(fadeTime).play();
+                action.setLoop(loop ? THREE.LoopRepeat : THREE.LoopOnce);
+                this.currentAction = action;
+            }
+            update(dt) { if (this.mixer) this.mixer.update(dt); if (this.mesh) this.mesh.position.copy(this.position); }
+            addTo(scene) { if (this.mesh) scene.add(this.mesh); return this; }
+        }
+
+        // NPCAgent
+        class NPCAgent {
+            constructor(character3D, { speed = 3, sightRange = 15, attackRange = 2, patrolPoints = [] } = {}) {
+                this.char = character3D;
+                this.speed = speed;
+                this.sightRange = sightRange;
+                this.attackRange = attackRange;
+                this.patrolPoints = patrolPoints;
+                this.patrolIndex = 0;
+                this.state = "idle";
+                this.idleTimer = 0;
+                this.onAttack = null;
+            }
+            update(dt, target) {
+                const pos = this.char.position;
+                const distToTarget = target ? pos.distanceTo(target.position) : Infinity;
+                if (distToTarget <= this.attackRange) this.state = "attack";
+                else if (distToTarget <= this.sightRange) this.state = "chase";
+                else if (this.state === "chase" || this.state === "attack") this.state = "idle";
+
+                switch (this.state) {
+                    case "idle":
+                        this.idleTimer += dt;
+                        if (this.idleTimer > 2 && this.patrolPoints.length) { this.state = "patrol"; this.idleTimer = 0; }
+                        this.char.play("idle");
+                        break;
+                    case "patrol": {
+                        const p = this.patrolPoints[this.patrolIndex];
+                        if (p) {
+                            this._moveToward(p, dt);
+                            if (pos.distanceTo(p) < 0.5) {
+                                this.patrolIndex = (this.patrolIndex + 1) % this.patrolPoints.length;
+                                this.state = "idle";
+                            }
+                        }
+                        this.char.play("walk");
+                        break;
+                    }
+                    case "chase":
+                        if (target) this._moveToward(target.position, dt);
+                        this.char.play("run");
+                        break;
+                    case "attack":
+                        this.char.play("attack", { loop: false });
+                        if (this.onAttack && target) this.onAttack(target);
+                        break;
+                }
+            }
+            _moveToward(targetPos, dt) {
+                const pos = this.char.position;
+                const dir = new THREE.Vector3().subVectors(targetPos, pos);
+                dir.y = 0;
+                const dist = dir.length();
+                if (dist > 0.01) {
+                    dir.normalize();
+                    pos.x += dir.x * this.speed * dt;
+                    pos.z += dir.z * this.speed * dt;
+                    if (this.char.mesh) this.char.mesh.rotation.y = Math.atan2(dir.x, dir.z);
+                }
+            }
+        }
+
+        // NetworkClient
+        class NetworkClient {
+            constructor() {
+                this.ws = null;
+                this.connected = false;
+                this.playerId = null;
+                this.listeners = {};
+                this.sendQueue = [];
+            }
+            connect(url) {
+                return new Promise((resolve, reject) => {
+                    try { this.ws = new WebSocket(url); } catch(e) { reject(e); return; }
+                    this.ws.onopen = () => {
+                        this.connected = true;
+                        this.sendQueue.forEach(msg => this.ws.send(msg));
+                        this.sendQueue = [];
+                        resolve(this);
+                    };
+                    this.ws.onmessage = (event) => {
+                        let data;
+                        try { data = JSON.parse(event.data); } catch { return; }
+                        if (data.type === "welcome") this.playerId = data.id;
+                        this._emit(data.type, data);
+                    };
+                    this.ws.onclose = () => { this.connected = false; this._emit("disconnected", {}); };
+                    this.ws.onerror = (err) => { this._emit("error", err); reject(err); };
+                });
+            }
+            on(eventType, callback) { if (!this.listeners[eventType]) this.listeners[eventType] = []; this.listeners[eventType].push(callback); }
+            _emit(eventType, data) { (this.listeners[eventType] || []).forEach(cb => cb(data)); }
+            send(type, payload = {}) {
+                const msg = JSON.stringify({ type, ...payload });
+                if (this.connected) this.ws.send(msg);
+                else this.sendQueue.push(msg);
+            }
+            sendPlayerState(position, rotation) {
+                this.send("state", { x: position.x, y: position.y, z: position.z, ry: rotation });
+            }
+            disconnect() { if (this.ws) this.ws.close(); }
+        }
+
+        // Scene3D
+        class Scene3D {
+            constructor(canvas, { fogColor = 0x88ccee, fogNear = 30, fogFar = 250 } = {}) {
+                this.scene = new THREE.Scene();
+                this.scene.fog = new THREE.Fog(fogColor, fogNear, fogFar);
+                this.scene.background = new THREE.Color(fogColor);
+
+                this.camera = new THREE.PerspectiveCamera(70, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+                this.camera.position.set(0, 5, 10);
+
+                this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+
+                const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+                sun.position.set(50, 80, 30);
+                sun.castShadow = true;
+                sun.shadow.mapSize.set(2048, 2048);
+                sun.shadow.camera.left = -100;
+                sun.shadow.camera.right = 100;
+                sun.shadow.camera.top = 100;
+                sun.shadow.camera.bottom = -100;
+                this.scene.add(sun);
+                this.scene.add(new THREE.AmbientLight(0x8899aa, 0.6));
+
+                this.physics = new Physics3D();
+                this.sound = new SoundManager();
+                this.network = new NetworkClient();
+                this.terrain = null;
+                this.characters = [];
+                this.npcs = [];
+
+                window.addEventListener("resize", () => this._onResize(canvas));
+            }
+            createOpenWorld(options) {
+                this.terrain = new OpenWorldTerrain(options).addTo(this.scene);
+                this.physics.groundY = (x,z) => this.terrain.heightAt(x,z);
+                return this.terrain;
+            }
+            addCharacter(character3D) {
+                character3D.addTo(this.scene);
+                this.characters.push(character3D);
+                return character3D;
+            }
+            addNPC(npcAgent) {
+                this.npcs.push(npcAgent);
+                return npcAgent;
+            }
+            update(dt, playerCharacter) {
+                const terrainFn = this.terrain ? (x,z) => this.terrain.heightAt(x,z) : null;
+                this.physics.update(dt, terrainFn);
+                for (const c of this.characters) c.update(dt);
+                for (const n of this.npcs) n.update(dt, playerCharacter);
+            }
+            render() { this.renderer.render(this.scene, this.camera); }
+            _onResize(canvas) {
+                this.camera.aspect = canvas.clientWidth / canvas.clientHeight;
+                this.camera.updateProjectionMatrix();
+                this.renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+            }
+        }
+
+        // Добавляем всё в NeonEngineV7.ThreeD
+        global.NeonEngineV7.ThreeD = {
+            Scene3D,
+            Physics3D,
+            OpenWorldTerrain,
+            Character3D,
+            NPCAgent,
+            SoundManager,
+            NetworkClient,
+            version: "1.0.0"
+        };
+
+        console.log('🧊 NeonEngine3D v1.0 подключен');
+    } else {
+        console.warn('Three.js не найден — 3D часть неактивна');
+    }
+
+    // ============================================================
+    //  ЭКСПОРТ В ГОЛОВНОЙ ОБЪЕКТ
+    // ============================================================
+
+    global.NeonEngine = global.NeonEngineV7;
+    global.NeonEngine.version = '8.0.0-ultimate';
+
+    console.log('⚡ NEON ENGINE ULTIMATE v8.0 загружен!');
+    console.log('✅ 2D + 3D');
+    console.log('✅ Готов к использованию!');
+
+})(typeof window !== 'undefined' ? window : this);
