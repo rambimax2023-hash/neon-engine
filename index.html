@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Моя игра на Neon Engine</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body {
+            background: #0a0a12;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        canvas {
+            border: 2px solid #22d3ee;
+            border-radius: 8px;
+            max-width: 100%;
+            max-height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game"></canvas>
+
+    <!-- ТВОЙ ДВИЖОК -->
+    <script src="neon-engine.js"></script>
+
+    <script>
+        // ============================================
+        // 1. СОЗДАЁМ ДВИЖОК
+        // ============================================
+        const engine = NeonEngine.create(document.getElementById('game'), {
+            width: 420,
+            height: 640
+        });
+
+        // ============================================
+        // 2. СОЗДАЁМ СЦЕНУ
+        // ============================================
+        const gameScene = {
+            start(api) {
+                this.player = { x: 200, y: 550, w: 40, h: 40 };
+                this.score = 0;
+                this.enemies = [];
+                this.spawnTimer = 0;
+            },
+
+            update(dt, api) {
+                // УПРАВЛЕНИЕ
+                if (api.keys.left) this.player.x -= 200 * dt;
+                if (api.keys.right) this.player.x += 200 * dt;
+                if (api.keys.up) this.player.y -= 200 * dt;
+                if (api.keys.down) this.player.y += 200 * dt;
+
+                // ГРАНИЦЫ
+                if (this.player.x < 0) this.player.x = 0;
+                if (this.player.x > 420 - this.player.w) this.player.x = 420 - this.player.w;
+                if (this.player.y < 0) this.player.y = 0;
+                if (this.player.y > 640 - this.player.h) this.player.y = 640 - this.player.h;
+
+                // СПАВН ВРАГОВ
+                this.spawnTimer += dt;
+                if (this.spawnTimer > 1) {
+                    this.spawnTimer = 0;
+                    this.enemies.push({
+                        x: Math.random() * 420,
+                        y: -20,
+                        w: 30,
+                        h: 30,
+                        speed: 50 + Math.random() * 100
+                    });
+                }
+
+                // ДВИЖЕНИЕ ВРАГОВ
+                for (let i = this.enemies.length - 1; i >= 0; i--) {
+                    const e = this.enemies[i];
+                    e.y += e.speed * dt;
+
+                    // ВРАГ ЗА ЭКРАНОМ
+                    if (e.y > 640) {
+                        this.enemies.splice(i, 1);
+                        continue;
+                    }
+
+                    // СТОЛКНОВЕНИЕ С ИГРОКОМ
+                    if (this.player.x < e.x + e.w &&
+                        this.player.x + this.player.w > e.x &&
+                        this.player.y < e.y + e.h &&
+                        this.player.y + this.player.h > e.y) {
+                        // ИГРОК УБИЛ ВРАГА
+                        this.score++;
+                        api.particles.spawn(e.x, e.y, '#f472b6', 20);
+                        api.audio.beep(440, 0.1);
+                        this.enemies.splice(i, 1);
+                    }
+                }
+            },
+
+            draw(ctx, api) {
+                // ФОН
+                ctx.fillStyle = '#0f0f1a';
+                ctx.fillRect(0, 0, 420, 640);
+
+                // ВРАГИ
+                for (const e of this.enemies) {
+                    ctx.fillStyle = '#f472b6';
+                    ctx.shadowColor = '#f472b6';
+                    ctx.shadowBlur = 15;
+                    ctx.fillRect(e.x, e.y, e.w, e.h);
+                    ctx.shadowBlur = 0;
+                }
+
+                // ИГРОК
+                ctx.fillStyle = '#22d3ee';
+                ctx.shadowColor = '#22d3ee';
+                ctx.shadowBlur = 20;
+                ctx.fillRect(this.player.x, this.player.y, this.player.w, this.player.h);
+                ctx.shadowBlur = 0;
+
+                // СЧЁТ
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '24px monospace';
+                ctx.fillText('Счёт: ' + this.score, 20, 40);
+            }
+        };
+
+        // ============================================
+        // 3. ЗАПУСК
+        // ============================================
+        engine.registerScene('game', gameScene);
+        engine.switchScene('game');
+        engine.start();
+
+        console.log('🎮 Игра запущена!');
+        console.log('⬅️ ➡️ Стрелки - движение');
+    </script>
+</body>
+  </html>
